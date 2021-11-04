@@ -1,0 +1,12 @@
+[package]
+name = "bones-day"
+version = "0.1.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+axum = "0.3.0" # web framework
+egg-mode = "0.16.0" # twitter api
+futures = "0.3"
+tokio = { version = "1.13.0", features = ["rt", "rt-multi-thread", "macros"] }
