@@ -6,7 +6,7 @@ edition = "2021"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-axum = "0.2" # web framework
+async-std = { version = "1.10.0", features = ["attributes"] }
 egg-mode = "0.16.0" # twitter api
-maud = { version = "0.22.3", features = ["axum"] } # template engine
-tokio = { version = "1.13.0", features = ["rt", "rt-multi-thread", "macros"] }
+maud = { version = "0.22.3", features = ["tide"] } # template engine
+tide = "0.16.0" # web framework
