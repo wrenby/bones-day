@@ -1,5 +1,6 @@
 - initialize with most recent *valid* tweet
-- set up stream filter and vibe
+- set up stream filter and vibe parser
+- error handling
 - offset timezones in response
 
 
@@ -9,8 +10,7 @@ BONES DAY
 ---
 #BonesDay
 has bones
-bones day, preceded by anything other than no
-- planning for the future, also handle "not a "
+bones day, preceded by anything other than no or "not a"
 
 
 NO BONES DAY
