@@ -1,2 +1,1 @@
-consumer_* filter=git-crypt diff=git-crypt
-
+api/* filter=git-crypt diff=git-crypt
