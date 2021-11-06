@@ -1,6 +1,4 @@
 /*
-TODO
-
 https://crates.io/crates/egg-mode
 https://github.com/egg-mode-rs/egg-mode/blob/master/examples/stream_filter.rs
 https://developer.twitter.com/en/docs/twitter-api/getting-started/about-twitter-api
@@ -9,7 +7,8 @@ https://codereview.stackexchange.com/questions/254236/handling-shared-state-betw
 */
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
-use egg_mode::Token;
+use egg_mode::{KeyPair, Token, stream::{filter, StreamMessage}};
+use futures::{TryStreamExt, join};
 use serde::{Deserialize, Serialize};
 use std::{include_str, io, sync::RwLock, time::SystemTime};
 
@@ -58,13 +57,48 @@ async fn get_bones(mrv: web::Data<RwLock<VibeCheck>>) -> impl Responder {
     mrv.read().unwrap().clone()
 }
 
+#[get("/id/{name}")]
+async fn id(token: web::Data<Token>, name: web::Path<String>) -> String {
+    let user = egg_mode::user::show(name.into_inner(), &token).await.unwrap();
+    user.id.to_string()
+}
+
+async fn stream_tweets(token: Token, mrv: web::Data<RwLock<VibeCheck>>) {
+    let stream = filter()
+        // https://twitter.com/NoodlesBonesDay
+        //.follow(&[1449141522042167298])
+        .track(&["rustlang", "python", "java", "javascript"])
+        .language(&["en"])
+        .start(&token);
+
+    println!("{}", "started listening to stream");
+    stream.try_for_each(|msg| {
+        // Check the message type and print tweet to console
+        match msg {
+            // TODO: change stream to NoodlesBonesDay only, and update mrv on new tweets
+            StreamMessage::Tweet(tweet) => println!("Received tweet from {}:\n{}\n", tweet.user.unwrap().name, tweet.text),
+            StreamMessage::Ping => println!("PING!"),
+            StreamMessage::Disconnect(status, text) => println!("ERROR {}: {}", status, text),
+            _ => (),
+        }
+        // TODO: handle StreamMessage::Disconnect(u64, String) according to https://developer.twitter.com/en/docs/twitter-api/v1/tweets/filter-realtime/guides/connecting#disconnections
+        futures::future::ok(())
+    }).await.expect("Stream error");
+}
+
 #[actix_web::main]
 async fn main() -> io::Result<()> {
 
-    let token = Token::Bearer(include_str!("../api/bearer").trim_end().to_string());
+    // actix_token is a Data of a clone, not a clone of a Data, because token is read-only and being moved to a single thread, not shared between several
+    let key = include_str!("../api/key").trim_end();
+    let secret = include_str!("../api/secret").trim_end();
+    let keypair = KeyPair::new(key, secret);
+    let token = egg_mode::auth::bearer_token(&keypair).await.expect("Bearer token error");
     let actix_token = web::Data::new(token.clone());
 
-    // most recent vibe
+    egg_mode::auth::verify_tokens(&token).await.expect("Token invalid");
+
+    // mrv = most recent vibe
     let mrv = web::Data::new(
         RwLock::new(
             // TODO: scrape recent tweets to initialize this with an actual vibe check
@@ -81,12 +115,11 @@ async fn main() -> io::Result<()> {
     let server = HttpServer::new(move || App::new()
         .app_data(actix_token.clone())
         .app_data(actix_mrv.clone())
+        .service(id)
         .service(set_bones)
         .service(get_bones));
 
-    // TODO: start twitter listener thread, remove set_bones
-
-    server.bind(("127.0.0.1", 3000))?
-        .run()
-        .await
+    let stream_handle = stream_tweets(token, mrv);
+    let server_handle = server.bind(("127.0.0.1", 3000))?.run();
+    join!(stream_handle, server_handle).1
 }
