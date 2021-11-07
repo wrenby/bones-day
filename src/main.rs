@@ -7,67 +7,75 @@ https://codereview.stackexchange.com/questions/254236/handling-shared-state-betw
 */
 
 use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
+use chrono::{DateTime, Local, Utc};
 use egg_mode::{KeyPair, Token, stream::{filter, StreamMessage}};
 use futures::{TryStreamExt, join};
 use serde::{Deserialize, Serialize};
 use std::{include_str, io, sync::RwLock, time::SystemTime};
+use tera::{Tera, Context};
 
-#[derive(Clone, Serialize, Deserialize)]
+#[derive(Clone, Deserialize)]
 enum Vibe {
-    #[serde(rename = "Bones")]
+    #[serde(rename = "bones")]
     BonesDay,
-    #[serde(rename = "NoBones")]
+    #[serde(rename = "nobones")]
     NoBonesDay,
-    #[serde(rename = "Unkown")]
+    #[serde(rename = "unkown")]
     Unknown,
-    #[serde(rename = "RIP")]
+    #[serde(rename = "rip")]
     NoodlesFuckingDied, // rip 😔
 }
-
-#[derive(Clone, Serialize)]
-struct VibeCheck {
-    pub vibe: Vibe,
-    pub time: SystemTime,
-}
-impl Responder for VibeCheck {
-    fn respond_to(self, _req: &HttpRequest) -> HttpResponse {
-        if let Ok(body) = serde_json::to_string(&self) {
-            HttpResponse::Ok()
-                .content_type("application/json")
-                .body(body)
-        } else {
-            HttpResponse::InternalServerError()
-                .content_type("text/plain")
-                .body("Failed to serialize response")
-        }
+impl Vibe {
+    fn short(&self) -> String {
+        match &self {
+            Vibe::BonesDay => "Yes",
+            Vibe::NoBonesDay => "No",
+            Vibe::Unknown => "Unknown",
+            Vibe::NoodlesFuckingDied => "RIP",
+        }.to_string()
+    }
+    fn long(&self) -> Option<String> {
+        match &self {
+            Vibe::BonesDay => None,
+            Vibe::NoBonesDay => None,
+            Vibe::Unknown => Some("No word yet today from Noodle"),
+            Vibe::NoodlesFuckingDied => Some("Noodles fucking died :("),
+        }.map(String::from)
     }
 }
 
-#[get("/bones/set/{vibe}")]
+#[derive(Clone)]
+struct VibeCheck {
+    pub vibe: Vibe,
+    pub time: DateTime<chrono::Utc>,
+}
+
+#[get("/set/{vibe}")]
 async fn set_bones(mrv: web::Data<RwLock<VibeCheck>>, vibe: web::Path<Vibe>) -> String {
     let mut mrv = mrv.write().unwrap();
     mrv.vibe = vibe.into_inner();
-    mrv.time = SystemTime::now();
+    mrv.time = Utc::now();
 
     "OK".to_string()
 }
 
-#[get("/bones/get")]
-async fn get_bones(mrv: web::Data<RwLock<VibeCheck>>) -> impl Responder {
-    mrv.read().unwrap().clone()
-}
-
-#[get("/id/{name}")]
-async fn id(token: web::Data<Token>, name: web::Path<String>) -> String {
-    let user = egg_mode::user::show(name.into_inner(), &token).await.unwrap();
-    user.id.to_string()
+#[get("/get")]
+async fn get_bones(tera: web::Data<Tera>, mrv: web::Data<RwLock<VibeCheck>>) -> impl Responder {
+    let mrv = mrv.read().unwrap();
+    let mut ctx = Context::new();
+    ctx.insert("short", &mrv.vibe.short());
+    ctx.insert("long", &mrv.vibe.long());
+    // * I want to do mrv.time.with_timezone(&Local).format("... %Z"), but %Z doesn't actually print the timezone name like it should
+    // * chrono::DateTime::format is currently bugged https://github.com/chronotope/chrono/issues/288
+    ctx.insert("time", &format!("{}", mrv.time.format("%a %b %-d %H:%M:%S UTC")));
+    let rendered = tera.render("bones.html", &ctx).expect("Error rendering Tera template");
+    HttpResponse::Ok().body(rendered)
 }
 
 async fn stream_tweets(token: Token, mrv: web::Data<RwLock<VibeCheck>>) {
     let stream = filter()
         // https://twitter.com/NoodlesBonesDay
-        //.follow(&[1449141522042167298])
-        .track(&["rustlang", "python", "java", "javascript"])
+        .follow(&[1449141522042167298])
         .language(&["en"])
         .start(&token);
 
@@ -88,6 +96,11 @@ async fn stream_tweets(token: Token, mrv: web::Data<RwLock<VibeCheck>>) {
 
 #[actix_web::main]
 async fn main() -> io::Result<()> {
+    let tera = web::Data::new(
+        Tera::new(
+            concat!(env!("CARGO_MANIFEST_DIR"), "/templates/**/*")
+        ).expect("Error initializing Tera")
+    );
 
     // actix_token is a Data of a clone, not a clone of a Data, because token is read-only and being moved to a single thread, not shared between several
     let key = include_str!("../api/key").trim_end();
@@ -96,7 +109,7 @@ async fn main() -> io::Result<()> {
     let token = egg_mode::auth::bearer_token(&keypair).await.expect("Bearer token error");
     let actix_token = web::Data::new(token.clone());
 
-    egg_mode::auth::verify_tokens(&token).await.expect("Token invalid");
+    // * egg_mode::auth::verify_tokens(&token).await.expect("Token invalid");
 
     // mrv = most recent vibe
     let mrv = web::Data::new(
@@ -104,7 +117,7 @@ async fn main() -> io::Result<()> {
             // TODO: scrape recent tweets to initialize this with an actual vibe check
             VibeCheck {
                 vibe: Vibe::Unknown,
-                time: SystemTime::UNIX_EPOCH,
+                time: chrono::MIN_DATETIME, // unix epoch
             }
         )
     );
@@ -115,11 +128,12 @@ async fn main() -> io::Result<()> {
     let server = HttpServer::new(move || App::new()
         .app_data(actix_token.clone())
         .app_data(actix_mrv.clone())
-        .service(id)
+        .app_data(tera.clone())
         .service(set_bones)
         .service(get_bones));
 
-    let stream_handle = stream_tweets(token, mrv);
+    // * let stream_handle = stream_tweets(token, mrv);
     let server_handle = server.bind(("127.0.0.1", 3000))?.run();
-    join!(stream_handle, server_handle).1
+    // * join!(stream_handle, server_handle).1
+    server_handle.await
 }

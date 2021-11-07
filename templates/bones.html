@@ -1,0 +1,16 @@
+<!DOCTYPE html>
+<html>
+    <head>
+        <meta charset="utf-8" />
+        <title>Does Noodles Have Bones Today?</title>
+    </head>
+    <body>
+        {% block content %}
+        <h1>{{short}}</h1>
+        {% if long %}
+            <p>{{long}}</p>
+        {% endif %}
+        <p>Last Updated: {{time}}</p>
+        {% endblock content %}
+    </body>
+</html>
