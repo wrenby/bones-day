@@ -6,12 +6,13 @@ https://joshchoo.com/writing/how-actix-web-app-state-and-data-extractor-works
 https://codereview.stackexchange.com/questions/254236/handling-shared-state-between-actix-and-a-parallel-thread
 */
 
-use actix_web::{App, HttpRequest, HttpResponse, HttpServer, Responder, get, web};
-use chrono::{DateTime, Local, Utc};
+use actix_web::{App, HttpResponse, HttpServer, Responder, get, web};
+use chrono::{DateTime, Utc};
+use chrono_tz::America::New_York;
 use egg_mode::{KeyPair, Token, stream::{filter, StreamMessage}};
 use futures::{TryStreamExt, join};
-use serde::{Deserialize, Serialize};
-use std::{include_str, io, sync::RwLock, time::SystemTime};
+use serde::Deserialize;
+use std::{include_str, io, sync::RwLock};
 use tera::{Tera, Context};
 
 #[derive(Clone, Deserialize)]
@@ -20,26 +21,26 @@ enum Vibe {
     BonesDay,
     #[serde(rename = "nobones")]
     NoBonesDay,
-    #[serde(rename = "unkown")]
-    Unknown,
-    #[serde(rename = "rip")]
-    NoodlesFuckingDied, // rip 😔
+    #[serde(rename = "noreading")]
+    NoReading,
+    #[serde(rename = "error")]
+    Error,
 }
 impl Vibe {
     fn short(&self) -> String {
         match &self {
             Vibe::BonesDay => "Yes",
             Vibe::NoBonesDay => "No",
-            Vibe::Unknown => "Unknown",
-            Vibe::NoodlesFuckingDied => "RIP",
+            Vibe::NoReading => "No Reading",
+            Vibe::Error => "Error",
         }.to_string()
     }
     fn long(&self) -> Option<String> {
         match &self {
             Vibe::BonesDay => None,
             Vibe::NoBonesDay => None,
-            Vibe::Unknown => Some("No word yet today from Noodle"),
-            Vibe::NoodlesFuckingDied => Some("Noodles fucking died :("),
+            Vibe::NoReading => Some("Noodles is taking a break today"),
+            Vibe::Error => Some("The server had trouble making sense of today's tweet"),
         }.map(String::from)
     }
 }
@@ -47,7 +48,7 @@ impl Vibe {
 #[derive(Clone)]
 struct VibeCheck {
     pub vibe: Vibe,
-    pub time: DateTime<chrono::Utc>,
+    pub time: DateTime<Utc>,
 }
 
 #[get("/set/{vibe}")]
@@ -56,22 +57,63 @@ async fn set_bones(mrv: web::Data<RwLock<VibeCheck>>, vibe: web::Path<Vibe>) -> 
     mrv.vibe = vibe.into_inner();
     mrv.time = Utc::now();
 
-    "OK".to_string()
+    "OK\n".to_string()
 }
 
 #[get("/get")]
 async fn get_bones(tera: web::Data<Tera>, mrv: web::Data<RwLock<VibeCheck>>) -> impl Responder {
-    let mrv = mrv.read().unwrap();
     let mut ctx = Context::new();
-    ctx.insert("short", &mrv.vibe.short());
-    ctx.insert("long", &mrv.vibe.long());
-    // * I want to do mrv.time.with_timezone(&Local).format("... %Z"), but %Z doesn't actually print the timezone name like it should
-    // * chrono::DateTime::format is currently bugged https://github.com/chronotope/chrono/issues/288
-    ctx.insert("time", &format!("{}", mrv.time.format("%a %b %-d %H:%M:%S UTC")));
+    {
+        let mrv = mrv.read().unwrap();
+        // TODO: check against timezone of... request IP? instead of enforcing New York time
+        let local_time = mrv.time.with_timezone(&New_York);
+        let local_now = Utc::now().with_timezone(&New_York);
+        ctx.insert("time", &format!("{}", local_time.format("%a %b %-d %H:%M:%S %Z")));
+
+        // readings expire at midnight
+        if local_now.date() == local_time.date() {
+            ctx.insert("short", &mrv.vibe.short());
+            ctx.insert("long", &mrv.vibe.long());
+        } else {
+            // ? maybe i should just show yesterday's reading instead of this shitty physics gag
+            // ? alternatively, maybe i should cycle through like 20 equally shitty gags...
+            ctx.insert("short", "Superposition");
+            ctx.insert("long", "Noodles is fast asleep. Until measured, he simultaneously does and does not have bones.");
+        }
+    }
+
     let rendered = tera.render("bones.html", &ctx).expect("Error rendering Tera template");
     HttpResponse::Ok().body(rendered)
 }
 
+// making this a path extractor instead of learning how to use request payloads is lazy as shit, but it works
+#[get("/parse/{text}")]
+async fn parse(text: web::Path<String>, mrv: web::Data<RwLock<VibeCheck>>) -> String {
+    let text = text.to_lowercase();
+    // a possibly more robust way to do this would be to assign weight to each pattern, and select the reading with the highest weight
+    let no_reading = ["no reading", "no new reading"].iter().any(|p| text.contains(p));
+    let bones_day = ["#BonesDay", "has bones", "bones day"].iter().any(|p| text.contains(p));
+    let no_bones_day = ["#NoBonesDay", "no bones", "does not have bones", "not a bones day"].iter().any(|p| text.contains(p));
+
+    // no bones day patterns are more specific and therefore trump bones days on cases where they both trigger
+    // e.g. "it is a no bones day" will trigger "bones day" and "no bones" but we care more about "no bones"
+    // there are no such circumstances where anything can trigger a false positive no bones, but "no reading" trumps both
+    let vibe = match (no_reading, no_bones_day, bones_day) {
+        (true, _, _) => Vibe::NoReading,
+        (false, true, _) => Vibe::NoBonesDay,
+        (false, false, true) => Vibe::BonesDay,
+        _ => Vibe::Error,
+    };
+
+    let mut mrv = mrv.write().unwrap();
+    mrv.vibe = vibe;
+    mrv.time = Utc::now();
+
+    "OK\n".to_string()
+}
+
+// ? stream_tweets might need an access token instead of a bearer token to function properly
+// https://github.com/egg-mode-rs/egg-mode/issues/109
 async fn stream_tweets(token: Token, mrv: web::Data<RwLock<VibeCheck>>) {
     let stream = filter()
         // https://twitter.com/NoodlesBonesDay
@@ -80,14 +122,33 @@ async fn stream_tweets(token: Token, mrv: web::Data<RwLock<VibeCheck>>) {
         .start(&token);
 
     println!("{}", "started listening to stream");
+
     stream.try_for_each(|msg| {
-        // Check the message type and print tweet to console
         match msg {
-            // TODO: change stream to NoodlesBonesDay only, and update mrv on new tweets
-            StreamMessage::Tweet(tweet) => println!("Received tweet from {}:\n{}\n", tweet.user.unwrap().name, tweet.text),
-            StreamMessage::Ping => println!("PING!"),
-            StreamMessage::Disconnect(status, text) => println!("ERROR {}: {}", status, text),
-            _ => (),
+            StreamMessage::Tweet(tweet) => {
+                // ignore quote tweets, retweets, and replies
+                if tweet.retweeted_status.is_none() && tweet.quoted_status.is_none() && tweet.in_reply_to_status_id.is_none() {
+                    let text = tweet.text.to_lowercase();
+                    // a possibly more robust way to do this would be to assign weight to each pattern, and select the reading with the highest weight
+                    let no_reading = ["no reading", "no new reading"].iter().any(|p| text.contains(p));
+                    let bones_day = ["#BonesDay", "has bones", "bones day"].iter().any(|p| text.contains(p));
+                    let no_bones_day = ["#NoBonesDay", "no bones", "does not have bones", "not a bones day"].iter().any(|p| text.contains(p));
+
+                    // no bones day patterns are more specific and therefore trump bones days on cases where they both trigger
+                    // e.g. "it is a no bones day" will trigger "bones day" and "no bones" but we care more about "no bones"
+                    // there are no such circumstances where anything can trigger a false positive no bones, but "no reading" trumps both
+                    let vibe = match (no_reading, no_bones_day, bones_day) {
+                        (true, _, _) => Vibe::NoReading,
+                        (false, true, _) => Vibe::NoBonesDay,
+                        (false, false, true) => Vibe::BonesDay,
+                        _ => Vibe::Error,
+                    };
+
+                    let mut mrv = mrv.write().unwrap();
+                    mrv.vibe = vibe;
+                    mrv.time = tweet.created_at;
+                }
+            }, _ => (),
         }
         // TODO: handle StreamMessage::Disconnect(u64, String) according to https://developer.twitter.com/en/docs/twitter-api/v1/tweets/filter-realtime/guides/connecting#disconnections
         futures::future::ok(())
@@ -116,7 +177,7 @@ async fn main() -> io::Result<()> {
         RwLock::new(
             // TODO: scrape recent tweets to initialize this with an actual vibe check
             VibeCheck {
-                vibe: Vibe::Unknown,
+                vibe: Vibe::Error,
                 time: chrono::MIN_DATETIME, // unix epoch
             }
         )
@@ -129,6 +190,7 @@ async fn main() -> io::Result<()> {
         .app_data(actix_token.clone())
         .app_data(actix_mrv.clone())
         .app_data(tera.clone())
+        .service(parse)
         .service(set_bones)
         .service(get_bones));
 
