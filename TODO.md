@@ -1,4 +1,6 @@
+- switch to polling instead of streaming
 - initialize with most recent *valid* tweet
+- make sure ctrl+c exits program properly
 - error handling
 - offset timezones in response
-- tbh the egg-mode stream filter kinda sucks; maybe i should just use reqwest + serde manually
+- logging
